@@ -64,7 +64,7 @@ def test_score_and_scan_appends_release_progress_jsonl(tmp_path):
     db.record_release(event)
     jsonl_log = tmp_path / "radar-events.jsonl"
 
-    score_and_scan(
+    results = score_and_scan(
         db,
         [event],
         scan=False,
@@ -80,4 +80,6 @@ def test_score_and_scan_appends_release_progress_jsonl(tmp_path):
 
     records = [json.loads(line) for line in jsonl_log.read_text(encoding="utf-8").splitlines()]
     assert [record["type"] for record in records] == ["release_started", "release_processed"]
-    assert records[1]["result"]["reports"]["json"].endswith("npm-tiny-package-1.0.0.json")
+    assert records[1]["report"]["release"]["package_name"] == "tiny-package"
+    assert records[1]["report"]["scores"]["risk_score"] == 5
+    assert results[0]["log"]["jsonl"] == str(jsonl_log)

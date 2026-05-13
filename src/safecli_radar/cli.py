@@ -13,7 +13,7 @@ from safecli_radar.history import annotate_history
 from safecli_radar.models import ReleaseEvent
 from safecli_radar.npm_watcher import NpmWatcher
 from safecli_radar.pypi_watcher import PyPIWatcher
-from safecli_radar.reporter import append_jsonl_record, write_report
+from safecli_radar.reporter import append_jsonl_record, build_release_report
 from safecli_radar.resolver import resolve_package
 from safecli_radar.safecli_runner import run_safecli
 from safecli_radar.scan_policy import decide_scan
@@ -33,11 +33,10 @@ def build_parser() -> argparse.ArgumentParser:
         description="Watch npm and PyPI releases and send high-signal candidates to SafeCLI.",
     )
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="SQLite DB path")
-    parser.add_argument("--reports-dir", default="./data/reports", help="Report output directory")
     parser.add_argument(
         "--jsonl-log",
         default=DEFAULT_JSONL_LOG_PATH,
-        help="Append-only JSONL progress log path; pass an empty string to disable",
+        help="Append-only JSONL output path; pass an empty string to disable",
     )
     parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT, help="Registry User-Agent")
     parser.add_argument("--safecli-command", default="safecli", help="SafeCLI command name/path")
@@ -167,7 +166,6 @@ def cmd_once(args: argparse.Namespace) -> int:
         safecli_artifacts_dir=args.safecli_artifacts_dir,
         safecli_provider=args.safecli_provider,
         safecli_cwd=args.safecli_cwd,
-        reports_dir=args.reports_dir,
         jsonl_log=args.jsonl_log,
     )
     print(json.dumps(results, ensure_ascii=True, indent=2))
@@ -196,7 +194,6 @@ def cmd_check(args: argparse.Namespace) -> int:
         safecli_artifacts_dir=args.safecli_artifacts_dir,
         safecli_provider=args.safecli_provider,
         safecli_cwd=args.safecli_cwd,
-        reports_dir=args.reports_dir,
         jsonl_log=args.jsonl_log,
     )
     print(json.dumps(results, ensure_ascii=True, indent=2))
@@ -251,13 +248,12 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     safecli_artifacts_dir=args.safecli_artifacts_dir,
                     safecli_provider=args.safecli_provider,
                     safecli_cwd=args.safecli_cwd,
-                    reports_dir=args.reports_dir,
                     jsonl_log=args.jsonl_log,
                 )
                 cycle_summary = {
                     "cycle": cycles,
-                    "events": len(events),
-                    "results": len(results),
+                    "feed_candidates": len(events),
+                    "processed": len(results),
                     "elapsed_sec": round(time.time() - cycle_started, 2),
                 }
                 append_jsonl_record(args.jsonl_log, {"type": "cycle_completed", **cycle_summary})
@@ -297,7 +293,7 @@ def _print_watch_summary(results: list[dict]) -> None:
         if (item.get("scan_decision") or {}).get("should_scan")
     ]
     print(
-        "safecli-radar reports="
+        "safecli-radar processed="
         f"{len(results)} scan_candidates={len(selected)}"
         " use --output json for full cycle payload",
         flush=True,
@@ -310,7 +306,7 @@ def _print_watch_summary(results: list[dict]) -> None:
             f"{item.get('ecosystem')} {_display_spec(item)} "
             f"risk={item.get('risk_score')} impact={item.get('impact_score')} "
             f"reasons={reasons or 'n/a'} "
-            f"report={(item.get('reports') or {}).get('json')}",
+            f"log={(item.get('log') or {}).get('jsonl')}",
             flush=True,
         )
     if len(selected) > 20:
@@ -359,7 +355,6 @@ def score_and_scan(
     safecli_artifacts_dir: str | None = None,
     safecli_provider: str | None = None,
     safecli_cwd: str | None = None,
-    reports_dir: str = "./data/reports",
     jsonl_log: str | None = None,
 ) -> list[dict]:
     output: list[dict] = []
@@ -373,7 +368,7 @@ def score_and_scan(
             },
         )
         try:
-            item, safecli_ran = _score_and_scan_one(
+            item, safecli_ran, report, scored_event = _score_and_scan_one(
                 db,
                 event,
                 scan=scan,
@@ -392,19 +387,21 @@ def score_and_scan(
                 safecli_artifacts_dir=safecli_artifacts_dir,
                 safecli_provider=safecli_provider,
                 safecli_cwd=safecli_cwd,
-                reports_dir=reports_dir,
             )
             if safecli_ran:
                 safecli_count += 1
-            output.append(item)
-            append_jsonl_record(
+            log_path = append_jsonl_record(
                 jsonl_log,
                 {
                     "type": "release_processed",
-                    "release": _item_ref(item),
-                    "result": item,
+                    "release": _release_ref(scored_event),
+                    "report": report,
                 },
             )
+            if log_path:
+                db.record_event_log_path(scored_event, jsonl_path=log_path)
+                item["log"] = {"jsonl": log_path}
+            output.append(item)
         except Exception as exc:
             item = {
                 **_release_ref(event),
@@ -448,8 +445,7 @@ def _score_and_scan_one(
     safecli_artifacts_dir: str | None,
     safecli_provider: str | None,
     safecli_cwd: str | None,
-    reports_dir: str,
-) -> tuple[dict, bool]:
+) -> tuple[dict, bool, dict, ReleaseEvent]:
     event = annotate_history(event, db)
     db.update_metadata(event)
 
@@ -514,20 +510,13 @@ def _score_and_scan_one(
     elif scan and decision.should_scan and max_safecli > 0 and safecli_count >= max_safecli:
         item["scan_decision"]["budget_deferred"] = True
 
-    report_paths = write_report(
-        reports_dir=reports_dir,
+    report = build_release_report(
         event=event,
         item=item,
-        scan_decision=item["scan_decision"],
         safecli_result=safecli_result,
     )
-    db.record_report_paths(
-        event,
-        json_path=report_paths["json"],
-    )
-    item["reports"] = report_paths
 
-    return item, safecli_ran
+    return item, safecli_ran, report, event
 
 
 def _release_ref(event: ReleaseEvent) -> dict[str, str]:
@@ -537,15 +526,6 @@ def _release_ref(event: ReleaseEvent) -> dict[str, str]:
         "version": event.version,
         "source": event.source,
         "cursor": event.cursor,
-    }
-
-
-def _item_ref(item: dict) -> dict[str, object]:
-    return {
-        "ecosystem": item.get("ecosystem"),
-        "package_name": item.get("package_name"),
-        "version": item.get("version"),
-        "source": item.get("source"),
     }
 
 

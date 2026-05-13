@@ -2,10 +2,10 @@ import json
 from pathlib import Path
 
 from safecli_radar.models import ReleaseEvent
-from safecli_radar.reporter import append_jsonl_record, write_report
+from safecli_radar.reporter import append_jsonl_record, build_release_report
 
 
-def test_write_report_creates_json_only(tmp_path: Path):
+def test_build_release_report_returns_agent_readable_payload():
     event = ReleaseEvent(
         ecosystem="npm",
         package_name="@scope/pkg",
@@ -15,21 +15,24 @@ def test_write_report_creates_json_only(tmp_path: Path):
         seen_at="2026-05-13T00:00:00+00:00",
     )
 
-    paths = write_report(
-        reports_dir=tmp_path,
+    report = build_release_report(
         event=event,
         item={
             "risk_score": 0,
             "impact_score": 80,
             "reasons": ["downloads_last_week 10000 >= 10000"],
+            "scan_decision": {
+                "should_scan": True,
+                "reasons": ["impact"],
+                "budget_deferred": False,
+            },
         },
-        scan_decision={"should_scan": True, "reasons": ["impact"], "budget_deferred": False},
         safecli_result=None,
     )
 
-    assert Path(paths["json"]).exists()
-    assert set(paths) == {"json"}
-    assert not list(tmp_path.rglob("*.md"))
+    assert report["release"]["package_name"] == "@scope/pkg"
+    assert report["scores"]["impact_score"] == 80
+    assert report["scan_decision"]["should_scan"] is True
 
 
 def test_append_jsonl_record_writes_one_record_per_line(tmp_path: Path):

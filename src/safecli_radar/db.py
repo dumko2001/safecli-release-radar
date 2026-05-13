@@ -47,7 +47,7 @@ class RadarDB:
               safecli_stderr TEXT,
               safecli_json TEXT,
               scanned_at TEXT,
-              report_json_path TEXT,
+              event_log_path TEXT,
               PRIMARY KEY (ecosystem, package_name, version)
             );
 
@@ -55,7 +55,7 @@ class RadarDB:
             CREATE INDEX IF NOT EXISTS idx_releases_score ON releases(risk_score, impact_score);
             """
         )
-        self._ensure_column("releases", "report_json_path", "TEXT")
+        self._ensure_column("releases", "event_log_path", "TEXT")
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, column_type: str) -> None:
@@ -172,20 +172,20 @@ class RadarDB:
         )
         self.conn.commit()
 
-    def record_report_paths(
+    def record_event_log_path(
         self,
         event: ReleaseEvent,
         *,
-        json_path: str,
+        jsonl_path: str,
     ) -> None:
         self.conn.execute(
             """
             UPDATE releases
-            SET report_json_path=?
+            SET event_log_path=?
             WHERE ecosystem=? AND package_name=? AND version=?
             """,
             (
-                json_path,
+                jsonl_path,
                 event.ecosystem,
                 event.package_name,
                 event.version,

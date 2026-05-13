@@ -59,8 +59,8 @@ Radar is built for the decision in the middle:
 - Enriches candidates with downloads and dependent-package signals.
 - Performs lightweight static archive triage before spending a SafeCLI scan.
 - Runs `safecli check ...` for high-risk or high-impact candidates.
-- Writes one JSON report per release under `./data/reports/YYYY-MM-DD/`.
-- Appends every cycle and release-processing step to `./data/radar-events.jsonl`.
+- Appends every cycle, release, score, scan decision, and SafeCLI result to
+  `./data/radar-events.jsonl`.
 
 ## Commands
 
@@ -157,7 +157,7 @@ flowchart LR
     C --> D["Enrich blast radius"]
     D --> E["Score risk and impact"]
     E --> F{"Scan policy match?"}
-    F -- "No" --> G["Write JSON report and JSONL event"]
+    F -- "No" --> G["Append JSONL report event"]
     F -- "Yes" --> H["safecli check"]
     H --> G
 ```
@@ -185,9 +185,8 @@ safecli check pypi package==version
 
 Local runtime files are written under `./data/`:
 
-- `radar.db` for release events, cursors, scores, reports, and SafeCLI results
-- `reports/` for JSON reports explaining scan decisions
-- `radar-events.jsonl` for append-only progress records that survive crashes
+- `radar.db` for release events, cursors, scores, JSONL location, and SafeCLI results
+- `radar-events.jsonl` for append-only report/progress records that survive crashes
 - optional SafeCLI DB and artifacts when passed through Radar flags
 
 The package archives Radar downloads for triage are temporary. They are not
@@ -204,9 +203,9 @@ Release means one exact package version seen from a registry feed, for example
 see many PyPI RSS entries at once because PyPI exposes a recent-update feed; that
 does not mean Radar scanned all of them with SafeCLI.
 
-JSON reports are one file per release. JSONL is the append-only progress log.
-Use JSON reports for full per-release detail, and JSONL when another process or
-agent wants to follow what Radar is doing live.
+JSONL is the canonical output stream. Each line is a complete JSON object, so an
+agent or another process can read it while Radar is running, and a crash only
+risks the record currently being written.
 
 ## Development
 
