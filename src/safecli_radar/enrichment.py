@@ -4,6 +4,7 @@ from urllib.parse import quote
 
 import requests
 
+from safecli_radar.http import polite_request
 from safecli_radar.models import ReleaseEvent
 
 NPM_DOWNLOADS_URL = "https://api.npmjs.org/downloads/point/last-week/{package}"
@@ -42,7 +43,7 @@ def enrich_release(event: ReleaseEvent, *, user_agent: str) -> ReleaseEvent:
 
 def _npm_downloads(session: requests.Session, package_name: str) -> dict[str, object] | None:
     encoded = quote(package_name, safe="")
-    response = session.get(NPM_DOWNLOADS_URL.format(package=encoded), timeout=20)
+    response = polite_request(session, "GET", NPM_DOWNLOADS_URL.format(package=encoded), timeout=20)
     if response.status_code == 404:
         return None
     response.raise_for_status()
@@ -61,7 +62,9 @@ def _deps_dev_dependents(session: requests.Session, event: ReleaseEvent) -> dict
 
     encoded_name = quote(event.package_name, safe="")
     encoded_version = quote(event.version, safe="")
-    response = session.get(
+    response = polite_request(
+        session,
+        "GET",
         DEPS_DEV_DEPENDENTS_URL.format(
             system=system,
             package=encoded_name,

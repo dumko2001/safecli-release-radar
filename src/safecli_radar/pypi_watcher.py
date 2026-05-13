@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 import xml.etree.ElementTree as ET
 import xmlrpc.client
 from typing import Any
@@ -8,6 +9,7 @@ from typing import Any
 import requests
 
 from safecli_radar.db import RadarDB, now_iso
+from safecli_radar.http import polite_request
 from safecli_radar.models import ReleaseEvent
 
 PYPI_RSS_UPDATES_URL = "https://pypi.org/rss/updates.xml"
@@ -15,11 +17,19 @@ PYPI_RSS_PACKAGES_URL = "https://pypi.org/rss/packages.xml"
 PYPI_PROJECT_JSON_URL = "https://pypi.org/pypi/{package}/json"
 PYPI_JSON_URL = "https://pypi.org/pypi/{package}/{version}/json"
 PYPI_XMLRPC_URL = "https://pypi.org/pypi"
+DEFAULT_CHANGELOG_INTERVAL_SEC = 300
 
 
 class PyPIWatcher:
-    def __init__(self, db: RadarDB, *, user_agent: str) -> None:
+    def __init__(
+        self,
+        db: RadarDB,
+        *,
+        user_agent: str,
+        changelog_interval_sec: int = DEFAULT_CHANGELOG_INTERVAL_SEC,
+    ) -> None:
         self.db = db
+        self.changelog_interval_sec = changelog_interval_sec
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -32,7 +42,8 @@ class PyPIWatcher:
         events: list[ReleaseEvent] = []
         events.extend(self.poll_rss(PYPI_RSS_UPDATES_URL, state_prefix="pypi_updates"))
         events.extend(self.poll_rss(PYPI_RSS_PACKAGES_URL, state_prefix="pypi_packages"))
-        events.extend(self.poll_changelog())
+        if self._should_poll_changelog():
+            events.extend(self.poll_changelog())
         return events
 
     def poll_rss(self, url: str, *, state_prefix: str) -> list[ReleaseEvent]:
@@ -41,7 +52,7 @@ class PyPIWatcher:
         if etag:
             headers["If-None-Match"] = etag
 
-        response = self.session.get(url, headers=headers, timeout=20)
+        response = polite_request(self.session, "GET", url, headers=headers, timeout=20)
         if response.status_code == 304:
             return []
         response.raise_for_status()
@@ -61,6 +72,7 @@ class PyPIWatcher:
         serial = self.db.get_state("pypi_serial")
         if serial is None:
             self.db.set_state("pypi_serial", self._xmlrpc_call("changelog_last_serial")[0])
+            self.db.set_state("pypi_changelog_checked_at_epoch", str(int(time.time())))
             return []
 
         rows = self._xmlrpc_call("changelog_since_serial", int(serial))[0]
@@ -84,7 +96,22 @@ class PyPIWatcher:
                 events.append(event)
 
         self.db.set_state("pypi_serial", max_serial)
+        self.db.set_state("pypi_changelog_checked_at_epoch", str(int(time.time())))
         return events
+
+    def _should_poll_changelog(self) -> bool:
+        if self.changelog_interval_sec <= 0:
+            return True
+        if self.db.get_state("pypi_serial") is None:
+            return True
+        checked_at = self.db.get_state("pypi_changelog_checked_at_epoch")
+        if checked_at is None:
+            return True
+        try:
+            age = time.time() - float(checked_at)
+        except ValueError:
+            return True
+        return age >= self.changelog_interval_sec
 
     def _parse_rss_item(self, item: ET.Element, *, source: str) -> ReleaseEvent | None:
         title = (item.findtext("title") or "").strip()
@@ -172,13 +199,13 @@ class PyPIWatcher:
 
     def fetch_release_metadata(self, package_name: str, version: str) -> dict[str, Any]:
         url = PYPI_JSON_URL.format(package=package_name, version=version)
-        response = self.session.get(url, timeout=20)
+        response = polite_request(self.session, "GET", url, timeout=20)
         response.raise_for_status()
         return self._compact_pypi_payload(response.json())
 
     def fetch_project_metadata(self, package_name: str) -> dict[str, Any]:
         url = PYPI_PROJECT_JSON_URL.format(package=package_name)
-        response = self.session.get(url, timeout=20)
+        response = polite_request(self.session, "GET", url, timeout=20)
         response.raise_for_status()
         return response.json()
 
@@ -208,7 +235,9 @@ class PyPIWatcher:
 
     def _xmlrpc_call(self, method: str, *params: object) -> tuple[Any, ...]:
         body = xmlrpc.client.dumps(params, methodname=method, allow_none=True)
-        response = self.session.post(
+        response = polite_request(
+            self.session,
+            "POST",
             PYPI_XMLRPC_URL,
             data=body,
             headers={"Content-Type": "text/xml"},

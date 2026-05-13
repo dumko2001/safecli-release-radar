@@ -181,6 +181,19 @@ safecli check pypi package==version
 - deps.dev: dependent-package enrichment when available
 - npm downloads API: last-week download enrichment for npm packages
 
+## Registry Etiquette
+
+Radar is a polling client, so it should be run politely:
+
+- Default watch interval is 30 seconds.
+- Requests use a descriptive `User-Agent`; override it with
+  `SAFECLI_RADAR_USER_AGENT` or `--user-agent` if you run this in production.
+- HTTP calls retry `429` and transient `5xx` responses with backoff and honor
+  `Retry-After` when the registry sends it.
+- PyPI XML-RPC changelog catch-up is throttled to every 5 minutes by default.
+  Change it with `--pypi-changelog-interval`; `0` checks every cycle.
+- SQLite dedupe prevents reprocessing the same exact package version.
+
 ## Local Files
 
 Local runtime files are written under `./data/`:

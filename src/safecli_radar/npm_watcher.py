@@ -5,6 +5,7 @@ from urllib.parse import quote
 import requests
 
 from safecli_radar.db import RadarDB, now_iso
+from safecli_radar.http import polite_request
 from safecli_radar.models import ReleaseEvent
 
 NPM_CHANGES_URL = "https://replicate.npmjs.com/registry/_changes"
@@ -28,7 +29,9 @@ class NpmWatcher:
             self.db.set_state("npm_seq", self._current_sequence())
             return []
 
-        response = self.session.get(
+        response = polite_request(
+            self.session,
+            "GET",
             NPM_CHANGES_URL,
             params={"since": cursor, "limit": str(limit)},
             headers={"Cache-Control": "no-cache"},
@@ -55,7 +58,9 @@ class NpmWatcher:
         return events
 
     def _current_sequence(self) -> int:
-        response = self.session.get(
+        response = polite_request(
+            self.session,
+            "GET",
             NPM_CHANGES_URL,
             params={"limit": "1", "descending": "true"},
             timeout=20,
@@ -68,7 +73,12 @@ class NpmWatcher:
 
     def _fetch_package_doc(self, package_name: str) -> dict:
         encoded = quote(package_name, safe="")
-        response = self.session.get(NPM_PACKAGE_URL.format(package=encoded), timeout=20)
+        response = polite_request(
+            self.session,
+            "GET",
+            NPM_PACKAGE_URL.format(package=encoded),
+            timeout=20,
+        )
         response.raise_for_status()
         return response.json()
 

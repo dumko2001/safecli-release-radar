@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import requests
 
+from safecli_radar.http import polite_request
 from safecli_radar.models import ReleaseEvent
 
 ARCHIVE_MAX_BYTES = 12_000_000
@@ -124,7 +125,7 @@ def _pypi_artifact_priority(item: dict) -> tuple[int, str]:
 
 
 def _download_archive(session: requests.Session, archive_url: str) -> bytes:
-    response = session.get(archive_url, timeout=30, stream=True)
+    response = polite_request(session, "GET", archive_url, timeout=30, stream=True)
     response.raise_for_status()
 
     chunks: list[bytes] = []

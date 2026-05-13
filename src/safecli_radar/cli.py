@@ -24,7 +24,7 @@ DEFAULT_DB_PATH = os.environ.get("SAFECLI_RADAR_DB_PATH", "./data/radar.db")
 DEFAULT_JSONL_LOG_PATH = os.environ.get("SAFECLI_RADAR_JSONL_LOG", "./data/radar-events.jsonl")
 DEFAULT_USER_AGENT = os.environ.get(
     "SAFECLI_RADAR_USER_AGENT",
-    "SafeCLI-Release-Radar/0.1 (+https://github.com/safecli/safecli-release-radar)",
+    "SafeCLI-Release-Radar/0.1 (+https://github.com/dumko2001/safecli-release-radar)",
 )
 
 
@@ -57,6 +57,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--safecli-cwd",
         default=None,
         help="Working directory for SafeCLI subprocesses",
+    )
+    parser.add_argument(
+        "--pypi-changelog-interval",
+        type=int,
+        default=int(os.environ.get("SAFECLI_RADAR_PYPI_CHANGELOG_INTERVAL", "300")),
+        help="Seconds between PyPI XML-RPC changelog catch-up calls; 0 checks every cycle",
     )
 
     sub = parser.add_subparsers(dest="command", required=True)
@@ -148,6 +154,7 @@ def cmd_once(args: argparse.Namespace) -> int:
         ecosystem=args.ecosystem,
         npm_limit=args.npm_limit,
         user_agent=args.user_agent,
+        pypi_changelog_interval=args.pypi_changelog_interval,
     )
     results = score_and_scan(
         db,
@@ -230,6 +237,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     ecosystem=args.ecosystem,
                     npm_limit=args.npm_limit,
                     user_agent=args.user_agent,
+                    pypi_changelog_interval=args.pypi_changelog_interval,
                 )
                 results = score_and_scan(
                     db,
@@ -344,12 +352,19 @@ def poll_once(
     ecosystem: str,
     npm_limit: int,
     user_agent: str,
+    pypi_changelog_interval: int,
 ) -> list[ReleaseEvent]:
     events: list[ReleaseEvent] = []
     if ecosystem in {"all", "npm"}:
         events.extend(NpmWatcher(db, user_agent=user_agent).poll(limit=npm_limit))
     if ecosystem in {"all", "pypi"}:
-        events.extend(PyPIWatcher(db, user_agent=user_agent).poll())
+        events.extend(
+            PyPIWatcher(
+                db,
+                user_agent=user_agent,
+                changelog_interval_sec=pypi_changelog_interval,
+            ).poll()
+        )
     return events
 
 

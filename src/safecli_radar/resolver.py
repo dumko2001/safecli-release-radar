@@ -5,6 +5,7 @@ from urllib.parse import quote
 import requests
 
 from safecli_radar.db import now_iso
+from safecli_radar.http import polite_request
 from safecli_radar.models import ReleaseEvent
 from safecli_radar.pypi_watcher import PyPIWatcher
 
@@ -29,7 +30,12 @@ def _resolve_npm(
 ) -> ReleaseEvent:
     session = requests.Session()
     session.headers.update({"User-Agent": user_agent, "Accept": "application/json"})
-    response = session.get(NPM_PACKAGE_URL.format(package=quote(package_name, safe="")), timeout=20)
+    response = polite_request(
+        session,
+        "GET",
+        NPM_PACKAGE_URL.format(package=quote(package_name, safe="")),
+        timeout=20,
+    )
     response.raise_for_status()
     package_doc = response.json()
 
