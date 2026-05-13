@@ -82,6 +82,18 @@ Run continuously:
 safecli-radar watch
 ```
 
+Smoke-test one watch cycle and exit:
+
+```bash
+safecli-radar watch --max-cycles 1 --no-scan
+```
+
+Print the full machine-readable watch payload:
+
+```bash
+safecli-radar watch --output json
+```
+
 Discovery only, without spending SafeCLI scans:
 
 ```bash

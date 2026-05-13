@@ -66,6 +66,18 @@ def build_parser() -> argparse.ArgumentParser:
     watch = sub.add_parser("watch", help="Poll release feeds continuously")
     _add_common_poll_args(watch)
     watch.add_argument("--interval", type=int, default=30, help="Seconds between poll cycles")
+    watch.add_argument(
+        "--max-cycles",
+        type=int,
+        default=0,
+        help="Stop after this many poll cycles; 0 means run forever",
+    )
+    watch.add_argument(
+        "--output",
+        choices=["summary", "json"],
+        default="summary",
+        help="Watch output mode",
+    )
 
     return parser
 
@@ -189,41 +201,113 @@ def cmd_watch(args: argparse.Namespace) -> int:
         "safecli-radar watching"
         f" ecosystem={args.ecosystem}"
         f" interval={args.interval}s"
-        f" db={Path(args.db).expanduser()}"
+        f" db={Path(args.db).expanduser()}",
+        flush=True,
     )
-    while True:
-        try:
-            events = poll_once(
-                db,
-                ecosystem=args.ecosystem,
-                npm_limit=args.npm_limit,
-                user_agent=args.user_agent,
-            )
-            results = score_and_scan(
-                db,
-                events,
-                scan=not args.no_scan,
-                enrich=not args.no_enrich,
-                artifact_triage=not args.no_artifact_triage,
-                user_agent=args.user_agent,
-                scan_threshold=args.scan_threshold,
-                impact_scan_threshold=args.impact_scan_threshold,
-                artifact_threshold=args.artifact_threshold,
-                max_safecli=args.max_safecli_per_cycle,
-                force_scan=False,
-                safecli_command=args.safecli_command,
-                safecli_config=args.safecli_config,
-                safecli_db=args.safecli_db,
-                safecli_artifacts_dir=args.safecli_artifacts_dir,
-                safecli_provider=args.safecli_provider,
-                safecli_cwd=args.safecli_cwd,
-                reports_dir=args.reports_dir,
-            )
-            if results:
-                print(json.dumps(results, ensure_ascii=True))
-        except Exception as exc:
-            print(json.dumps({"error": str(exc)}, ensure_ascii=True))
-        time.sleep(args.interval)
+    cycles = 0
+    try:
+        while True:
+            cycles += 1
+            cycle_started = time.time()
+            print(f"safecli-radar cycle={cycles} polling", flush=True)
+            try:
+                events = poll_once(
+                    db,
+                    ecosystem=args.ecosystem,
+                    npm_limit=args.npm_limit,
+                    user_agent=args.user_agent,
+                )
+                results = score_and_scan(
+                    db,
+                    events,
+                    scan=not args.no_scan,
+                    enrich=not args.no_enrich,
+                    artifact_triage=not args.no_artifact_triage,
+                    user_agent=args.user_agent,
+                    scan_threshold=args.scan_threshold,
+                    impact_scan_threshold=args.impact_scan_threshold,
+                    artifact_threshold=args.artifact_threshold,
+                    max_safecli=args.max_safecli_per_cycle,
+                    force_scan=False,
+                    safecli_command=args.safecli_command,
+                    safecli_config=args.safecli_config,
+                    safecli_db=args.safecli_db,
+                    safecli_artifacts_dir=args.safecli_artifacts_dir,
+                    safecli_provider=args.safecli_provider,
+                    safecli_cwd=args.safecli_cwd,
+                    reports_dir=args.reports_dir,
+                )
+                print(
+                    json.dumps(
+                        {
+                            "cycle": cycles,
+                            "events": len(events),
+                            "results": len(results),
+                            "elapsed_sec": round(time.time() - cycle_started, 2),
+                        },
+                        ensure_ascii=True,
+                    ),
+                    flush=True,
+                )
+                if results:
+                    if args.output == "json":
+                        print(json.dumps(results, ensure_ascii=True), flush=True)
+                    else:
+                        _print_watch_summary(results)
+            except Exception as exc:
+                print(
+                    json.dumps(
+                        {
+                            "cycle": cycles,
+                            "error": str(exc),
+                            "elapsed_sec": round(time.time() - cycle_started, 2),
+                        },
+                        ensure_ascii=True,
+                    ),
+                    flush=True,
+                )
+            if args.max_cycles > 0 and cycles >= args.max_cycles:
+                print("safecli-radar max cycles reached; exiting", flush=True)
+                return 0
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print("safecli-radar stopped", flush=True)
+        return 0
+
+
+def _print_watch_summary(results: list[dict]) -> None:
+    selected = [
+        item
+        for item in results
+        if (item.get("scan_decision") or {}).get("should_scan")
+    ]
+    print(
+        "safecli-radar reports="
+        f"{len(results)} scan_candidates={len(selected)}"
+        " use --output json for full cycle payload",
+        flush=True,
+    )
+    for item in selected[:20]:
+        decision = item.get("scan_decision") or {}
+        reasons = ", ".join(decision.get("reasons") or [])
+        print(
+            "candidate "
+            f"{item.get('ecosystem')} {_display_spec(item)} "
+            f"risk={item.get('risk_score')} impact={item.get('impact_score')} "
+            f"reasons={reasons or 'n/a'} "
+            f"report={(item.get('reports') or {}).get('json')}",
+            flush=True,
+        )
+    if len(selected) > 20:
+        print(f"safecli-radar omitted {len(selected) - 20} additional candidates", flush=True)
+
+
+def _display_spec(item: dict) -> str:
+    package_name = item.get("package_name")
+    version = item.get("version")
+    if item.get("ecosystem") == "pypi":
+        return f"{package_name}=={version}"
+    return f"{package_name}@{version}"
 
 
 def poll_once(
