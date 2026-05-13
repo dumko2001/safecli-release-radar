@@ -11,7 +11,7 @@ from safecli_radar.artifact_triage import triage_artifact
 from safecli_radar.db import RadarDB
 from safecli_radar.enrichment import enrich_release
 from safecli_radar.history import annotate_history
-from safecli_radar.models import ReleaseEvent
+from safecli_radar.models import CandidateScore, ReleaseEvent
 from safecli_radar.npm_watcher import NpmWatcher
 from safecli_radar.pypi_watcher import PyPIWatcher
 from safecli_radar.reporter import append_jsonl_record, build_release_report
@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     watch = sub.add_parser("watch", help="Poll release feeds continuously")
     _add_common_poll_args(watch)
-    watch.add_argument("--interval", type=int, default=30, help="Seconds between poll cycles")
+    watch.add_argument("--interval", type=int, default=60, help="Seconds between poll cycles")
     watch.add_argument(
         "--max-cycles",
         type=int,
@@ -121,7 +121,7 @@ def _add_scan_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--max-safecli-per-cycle",
         type=int,
-        default=3,
+        default=0,
         help="Maximum SafeCLI scans per polling cycle; 0 means no per-cycle cap",
     )
     parser.add_argument(
@@ -239,9 +239,26 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     user_agent=args.user_agent,
                     pypi_changelog_interval=args.pypi_changelog_interval,
                 )
+                pending_events = []
+                if not args.no_scan:
+                    pending_events = _pending_scan_events(
+                        db,
+                        risk_threshold=args.scan_threshold,
+                        impact_threshold=args.impact_scan_threshold,
+                        exclude=events,
+                    )
+                if pending_events:
+                    append_jsonl_record(
+                        args.jsonl_log,
+                        {
+                            "type": "pending_scans_loaded",
+                            "cycle": cycles,
+                            "count": len(pending_events),
+                        },
+                    )
                 results = score_and_scan(
                     db,
-                    events,
+                    [*pending_events, *events],
                     scan=not args.no_scan,
                     enrich=not args.no_enrich,
                     artifact_triage=not args.no_artifact_triage,
@@ -264,6 +281,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     events=events,
                     results=results,
                     elapsed_sec=time.time() - cycle_started,
+                    pending_scan_candidates=len(pending_events),
                 )
                 append_jsonl_record(args.jsonl_log, {"type": "cycle_completed", **cycle_summary})
                 print(
@@ -328,14 +346,81 @@ def _cycle_summary(
     events: list[ReleaseEvent],
     results: list[dict],
     elapsed_sec: float,
+    pending_scan_candidates: int = 0,
 ) -> dict:
     return {
         "cycle": cycle,
         "new_exact_versions": len(events),
+        "pending_scan_candidates": pending_scan_candidates,
         "processed": len(results),
         "source_counts": dict(sorted(Counter(event.source for event in events).items())),
         "elapsed_sec": round(elapsed_sec, 2),
     }
+
+
+def _pending_scan_events(
+    db: RadarDB,
+    *,
+    risk_threshold: int,
+    impact_threshold: int,
+    exclude: list[ReleaseEvent],
+    limit: int = 500,
+) -> list[ReleaseEvent]:
+    excluded = {(event.ecosystem, event.package_name, event.version) for event in exclude}
+    pending: list[ReleaseEvent] = []
+
+    for row in db.recent_unscanned(limit=limit):
+        key = (str(row["ecosystem"]), str(row["package_name"]), str(row["version"]))
+        if key in excluded:
+            continue
+        if row["risk_score"] is None or row["impact_score"] is None:
+            continue
+
+        event = ReleaseEvent(
+            ecosystem=key[0],
+            package_name=key[1],
+            version=key[2],
+            source=str(row["source"]),
+            cursor=str(row["cursor"]),
+            seen_at=str(row["seen_at"]),
+            metadata=_decode_json_object(row["metadata_json"]),
+        )
+        score = CandidateScore(
+            risk_score=int(row["risk_score"]),
+            impact_score=int(row["impact_score"]),
+            reasons=_decode_json_list(row["reasons_json"]),
+        )
+        if decide_scan(
+            event,
+            score,
+            risk_threshold=risk_threshold,
+            impact_threshold=impact_threshold,
+        ).should_scan:
+            pending.append(event)
+
+    return pending
+
+
+def _decode_json_object(value: str | None) -> dict:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _decode_json_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed]
 
 
 def _display_spec(item: dict) -> str:

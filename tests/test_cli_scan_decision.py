@@ -1,6 +1,6 @@
 import json
 
-from safecli_radar.cli import _cycle_summary, score_and_scan
+from safecli_radar.cli import _cycle_summary, _pending_scan_events, build_parser, score_and_scan
 from safecli_radar.db import RadarDB
 from safecli_radar.models import ReleaseEvent
 
@@ -85,6 +85,95 @@ def test_score_and_scan_appends_release_progress_jsonl(tmp_path):
     assert results[0]["log"]["jsonl"] == str(jsonl_log)
 
 
+def test_watch_defaults_run_forever_without_safecli_scan_cap():
+    args = build_parser().parse_args(["watch"])
+
+    assert args.interval == 60
+    assert args.max_cycles == 0
+    assert args.max_safecli_per_cycle == 0
+
+
+def test_deferred_scan_candidates_are_loaded_from_db(monkeypatch, tmp_path):
+    db = RadarDB(tmp_path / "radar.db")
+    db.init()
+    events = [
+        ReleaseEvent(
+            ecosystem="npm",
+            package_name="lodas",
+            version="1.0.0",
+            source="test",
+            cursor="1",
+            seen_at="2026-05-13T00:00:00+00:00",
+        ),
+        ReleaseEvent(
+            ecosystem="npm",
+            package_name="reactt",
+            version="1.0.0",
+            source="test",
+            cursor="2",
+            seen_at="2026-05-13T00:00:01+00:00",
+        ),
+    ]
+    for event in events:
+        db.record_release(event)
+
+    calls = []
+
+    def fake_run_safecli(event, **_kwargs):
+        calls.append(event)
+        from safecli_radar.models import SafeCLIResult
+
+        return SafeCLIResult(
+            command=["safecli", "check", event.ecosystem, event.package_name],
+            exit_code=0,
+            stdout="{}",
+            stderr="",
+            parsed_json={},
+        )
+
+    monkeypatch.setattr("safecli_radar.cli.run_safecli", fake_run_safecli)
+
+    first_results = score_and_scan(
+        db,
+        events,
+        scan=True,
+        enrich=False,
+        artifact_triage=False,
+        user_agent="test",
+        scan_threshold=70,
+        impact_scan_threshold=80,
+        artifact_threshold=25,
+        max_safecli=1,
+    )
+
+    assert len(calls) == 1
+    assert first_results[1]["scan_decision"]["budget_deferred"] is True
+
+    pending = _pending_scan_events(
+        db,
+        risk_threshold=70,
+        impact_threshold=80,
+        exclude=[],
+    )
+
+    assert [(event.package_name, event.version) for event in pending] == [("reactt", "1.0.0")]
+
+    score_and_scan(
+        db,
+        pending,
+        scan=True,
+        enrich=False,
+        artifact_triage=False,
+        user_agent="test",
+        scan_threshold=70,
+        impact_scan_threshold=80,
+        artifact_threshold=25,
+        max_safecli=1,
+    )
+
+    assert [event.package_name for event in calls] == ["lodas", "reactt"]
+
+
 def test_cycle_summary_names_new_exact_versions_and_sources():
     events = [
         ReleaseEvent(
@@ -108,6 +197,7 @@ def test_cycle_summary_names_new_exact_versions_and_sources():
     summary = _cycle_summary(cycle=1, events=events, results=[{}, {}], elapsed_sec=1.234)
 
     assert summary["new_exact_versions"] == 2
+    assert summary["pending_scan_candidates"] == 0
     assert summary["processed"] == 2
     assert summary["source_counts"] == {"pypi_changelog": 1, "pypi_updates": 1}
     assert "feed_candidates" not in summary

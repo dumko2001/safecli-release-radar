@@ -113,6 +113,12 @@ Tune scan policy:
 safecli-radar watch --scan-threshold 70 --impact-scan-threshold 80
 ```
 
+Optionally cap SafeCLI scans per cycle if you need spend control:
+
+```bash
+safecli-radar watch --max-safecli-per-cycle 10
+```
+
 Use a specific SafeCLI provider/config:
 
 ```bash
@@ -185,7 +191,12 @@ safecli check pypi package==version
 
 Radar is a polling client, so it should be run politely:
 
-- Default watch interval is 30 seconds.
+- Default watch interval is 60 seconds.
+- Radar does not crawl npmjs.com web pages or enumerate all registry packages.
+  It polls registry release/change sources and resolves metadata only for
+  changed packages.
+- Use `--interval 120` or `--interval 300` if you prefer a slower, more
+  conservative daemon.
 - Requests use a descriptive `User-Agent`; override it with
   `SAFECLI_RADAR_USER_AGENT` or `--user-agent` if you run this in production.
 - HTTP calls retry `429` and transient `5xx` responses with backoff and honor
@@ -193,6 +204,9 @@ Radar is a polling client, so it should be run politely:
 - PyPI XML-RPC changelog catch-up is throttled to every 5 minutes by default.
   Change it with `--pypi-changelog-interval`; `0` checks every cycle.
 - SQLite dedupe prevents reprocessing the same exact package version.
+- SafeCLI scans are uncapped by default. If you pass `--max-safecli-per-cycle`,
+  scan-worthy releases that do not fit in that cycle are retried from the DB on
+  later cycles.
 
 ## Local Files
 
@@ -210,6 +224,7 @@ kept in the repository.
 Cycle means one polling pass over the configured registry sources. `watch`
 normally runs forever and starts a new cycle every `--interval` seconds.
 `--max-cycles 1` is only a smoke-test/dev option.
+The default `--max-cycles 0` means no stop limit.
 
 Release means one exact package version seen from a registry feed, for example
 `npm is-number@7.0.0` or `pypi requests==2.32.3`. The first run on a fresh DB can
