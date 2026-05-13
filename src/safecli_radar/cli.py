@@ -13,13 +13,14 @@ from safecli_radar.history import annotate_history
 from safecli_radar.models import ReleaseEvent
 from safecli_radar.npm_watcher import NpmWatcher
 from safecli_radar.pypi_watcher import PyPIWatcher
-from safecli_radar.reporter import write_report
+from safecli_radar.reporter import append_jsonl_record, write_report
 from safecli_radar.resolver import resolve_package
 from safecli_radar.safecli_runner import run_safecli
 from safecli_radar.scan_policy import decide_scan
 from safecli_radar.scorer import score_release
 
 DEFAULT_DB_PATH = os.environ.get("SAFECLI_RADAR_DB_PATH", "./data/radar.db")
+DEFAULT_JSONL_LOG_PATH = os.environ.get("SAFECLI_RADAR_JSONL_LOG", "./data/radar-events.jsonl")
 DEFAULT_USER_AGENT = os.environ.get(
     "SAFECLI_RADAR_USER_AGENT",
     "SafeCLI-Release-Radar/0.1 (+https://github.com/safecli/safecli-release-radar)",
@@ -33,6 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="SQLite DB path")
     parser.add_argument("--reports-dir", default="./data/reports", help="Report output directory")
+    parser.add_argument(
+        "--jsonl-log",
+        default=DEFAULT_JSONL_LOG_PATH,
+        help="Append-only JSONL progress log path; pass an empty string to disable",
+    )
     parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT, help="Registry User-Agent")
     parser.add_argument("--safecli-command", default="safecli", help="SafeCLI command name/path")
     parser.add_argument("--safecli-config", default=None, help="Path to SafeCLI config JSON")
@@ -162,6 +168,7 @@ def cmd_once(args: argparse.Namespace) -> int:
         safecli_provider=args.safecli_provider,
         safecli_cwd=args.safecli_cwd,
         reports_dir=args.reports_dir,
+        jsonl_log=args.jsonl_log,
     )
     print(json.dumps(results, ensure_ascii=True, indent=2))
     return 0
@@ -190,6 +197,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         safecli_provider=args.safecli_provider,
         safecli_cwd=args.safecli_cwd,
         reports_dir=args.reports_dir,
+        jsonl_log=args.jsonl_log,
     )
     print(json.dumps(results, ensure_ascii=True, indent=2))
     return 0
@@ -210,6 +218,14 @@ def cmd_watch(args: argparse.Namespace) -> int:
             cycles += 1
             cycle_started = time.time()
             print(f"safecli-radar cycle={cycles} polling", flush=True)
+            append_jsonl_record(
+                args.jsonl_log,
+                {
+                    "type": "cycle_started",
+                    "cycle": cycles,
+                    "ecosystem": args.ecosystem,
+                },
+            )
             try:
                 events = poll_once(
                     db,
@@ -236,17 +252,17 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     safecli_provider=args.safecli_provider,
                     safecli_cwd=args.safecli_cwd,
                     reports_dir=args.reports_dir,
+                    jsonl_log=args.jsonl_log,
                 )
+                cycle_summary = {
+                    "cycle": cycles,
+                    "events": len(events),
+                    "results": len(results),
+                    "elapsed_sec": round(time.time() - cycle_started, 2),
+                }
+                append_jsonl_record(args.jsonl_log, {"type": "cycle_completed", **cycle_summary})
                 print(
-                    json.dumps(
-                        {
-                            "cycle": cycles,
-                            "events": len(events),
-                            "results": len(results),
-                            "elapsed_sec": round(time.time() - cycle_started, 2),
-                        },
-                        ensure_ascii=True,
-                    ),
+                    json.dumps(cycle_summary, ensure_ascii=True),
                     flush=True,
                 )
                 if results:
@@ -255,15 +271,14 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     else:
                         _print_watch_summary(results)
             except Exception as exc:
+                cycle_error = {
+                    "cycle": cycles,
+                    "error": str(exc),
+                    "elapsed_sec": round(time.time() - cycle_started, 2),
+                }
+                append_jsonl_record(args.jsonl_log, {"type": "cycle_error", **cycle_error})
                 print(
-                    json.dumps(
-                        {
-                            "cycle": cycles,
-                            "error": str(exc),
-                            "elapsed_sec": round(time.time() - cycle_started, 2),
-                        },
-                        ensure_ascii=True,
-                    ),
+                    json.dumps(cycle_error, ensure_ascii=True),
                     flush=True,
                 )
             if args.max_cycles > 0 and cycles >= args.max_cycles:
@@ -345,90 +360,193 @@ def score_and_scan(
     safecli_provider: str | None = None,
     safecli_cwd: str | None = None,
     reports_dir: str = "./data/reports",
+    jsonl_log: str | None = None,
 ) -> list[dict]:
     output: list[dict] = []
     safecli_count = 0
     for event in events:
-        event = annotate_history(event, db)
+        append_jsonl_record(
+            jsonl_log,
+            {
+                "type": "release_started",
+                "release": _release_ref(event),
+            },
+        )
+        try:
+            item, safecli_ran = _score_and_scan_one(
+                db,
+                event,
+                scan=scan,
+                enrich=enrich,
+                artifact_triage=artifact_triage,
+                user_agent=user_agent,
+                scan_threshold=scan_threshold,
+                impact_scan_threshold=impact_scan_threshold,
+                artifact_threshold=artifact_threshold,
+                max_safecli=max_safecli,
+                safecli_count=safecli_count,
+                force_scan=force_scan,
+                safecli_command=safecli_command,
+                safecli_config=safecli_config,
+                safecli_db=safecli_db,
+                safecli_artifacts_dir=safecli_artifacts_dir,
+                safecli_provider=safecli_provider,
+                safecli_cwd=safecli_cwd,
+                reports_dir=reports_dir,
+            )
+            if safecli_ran:
+                safecli_count += 1
+            output.append(item)
+            append_jsonl_record(
+                jsonl_log,
+                {
+                    "type": "release_processed",
+                    "release": _item_ref(item),
+                    "result": item,
+                },
+            )
+        except Exception as exc:
+            item = {
+                **_release_ref(event),
+                "error": str(exc),
+                "safecli": "not_run",
+                "scan_decision": {
+                    "should_scan": False,
+                    "reasons": ["release processing failed before scan decision"],
+                    "budget_deferred": False,
+                },
+            }
+            output.append(item)
+            append_jsonl_record(
+                jsonl_log,
+                {
+                    "type": "release_error",
+                    "release": _release_ref(event),
+                    "error": str(exc),
+                },
+            )
+    return output
+
+
+def _score_and_scan_one(
+    db: RadarDB,
+    event: ReleaseEvent,
+    *,
+    scan: bool,
+    enrich: bool,
+    artifact_triage: bool,
+    user_agent: str,
+    scan_threshold: int,
+    impact_scan_threshold: int,
+    artifact_threshold: int,
+    max_safecli: int,
+    safecli_count: int,
+    force_scan: bool,
+    safecli_command: str,
+    safecli_config: str | None,
+    safecli_db: str | None,
+    safecli_artifacts_dir: str | None,
+    safecli_provider: str | None,
+    safecli_cwd: str | None,
+    reports_dir: str,
+) -> tuple[dict, bool]:
+    event = annotate_history(event, db)
+    db.update_metadata(event)
+
+    if enrich:
+        event = enrich_release(event, user_agent=user_agent)
         db.update_metadata(event)
 
-        if enrich:
-            event = enrich_release(event, user_agent=user_agent)
-            db.update_metadata(event)
+    score = score_release(event)
 
+    if artifact_triage and (score.risk_score >= artifact_threshold or score.impact_score >= 80):
+        event = triage_artifact(event, user_agent=user_agent)
+        db.update_metadata(event)
         score = score_release(event)
 
-        if artifact_triage and (
-            score.risk_score >= artifact_threshold or score.impact_score >= 80
-        ):
-            event = triage_artifact(event, user_agent=user_agent)
-            db.update_metadata(event)
-            score = score_release(event)
+    db.update_score(event, score)
 
-        db.update_score(event, score)
+    item = {
+        "ecosystem": event.ecosystem,
+        "package_name": event.package_name,
+        "version": event.version,
+        "source": event.source,
+        "risk_score": score.risk_score,
+        "impact_score": score.impact_score,
+        "reasons": score.reasons,
+        "safecli": "not_run",
+    }
 
-        item = {
-            "ecosystem": event.ecosystem,
-            "package_name": event.package_name,
-            "version": event.version,
-            "source": event.source,
-            "risk_score": score.risk_score,
-            "impact_score": score.impact_score,
-            "reasons": score.reasons,
-            "safecli": "not_run",
-        }
+    decision = decide_scan(
+        event,
+        score,
+        risk_threshold=scan_threshold,
+        impact_threshold=impact_scan_threshold,
+        force_scan=force_scan,
+    )
+    item["scan_decision"] = {
+        "should_scan": decision.should_scan,
+        "reasons": decision.reasons,
+        "budget_deferred": False,
+    }
+    safecli_result = None
+    safecli_ran = False
 
-        decision = decide_scan(
+    within_budget = max_safecli <= 0 or safecli_count < max_safecli
+    if scan and decision.should_scan and within_budget:
+        result = run_safecli(
             event,
-            score,
-            risk_threshold=scan_threshold,
-            impact_threshold=impact_scan_threshold,
-            force_scan=force_scan,
+            command_name=safecli_command,
+            config_path=safecli_config,
+            db_path=safecli_db,
+            artifacts_dir=safecli_artifacts_dir,
+            provider=safecli_provider,
+            cwd=safecli_cwd,
         )
-        item["scan_decision"] = {
-            "should_scan": decision.should_scan,
-            "reasons": decision.reasons,
-            "budget_deferred": False,
+        db.record_safecli_result(event, result)
+        safecli_result = result
+        safecli_ran = True
+        item["safecli"] = {
+            "exit_code": result.exit_code,
+            "trust_state": (result.parsed_json or {}).get("trust_state"),
+            "aggregate_state": (result.parsed_json or {}).get("aggregate_state"),
         }
-        safecli_result = None
+    elif scan and decision.should_scan and max_safecli > 0 and safecli_count >= max_safecli:
+        item["scan_decision"]["budget_deferred"] = True
 
-        within_budget = max_safecli <= 0 or safecli_count < max_safecli
-        if scan and decision.should_scan and within_budget:
-            result = run_safecli(
-                event,
-                command_name=safecli_command,
-                config_path=safecli_config,
-                db_path=safecli_db,
-                artifacts_dir=safecli_artifacts_dir,
-                provider=safecli_provider,
-                cwd=safecli_cwd,
-            )
-            db.record_safecli_result(event, result)
-            safecli_result = result
-            safecli_count += 1
-            item["safecli"] = {
-                "exit_code": result.exit_code,
-                "trust_state": (result.parsed_json or {}).get("trust_state"),
-                "aggregate_state": (result.parsed_json or {}).get("aggregate_state"),
-            }
-        elif scan and decision.should_scan and max_safecli > 0 and safecli_count >= max_safecli:
-            item["scan_decision"]["budget_deferred"] = True
+    report_paths = write_report(
+        reports_dir=reports_dir,
+        event=event,
+        item=item,
+        scan_decision=item["scan_decision"],
+        safecli_result=safecli_result,
+    )
+    db.record_report_paths(
+        event,
+        json_path=report_paths["json"],
+    )
+    item["reports"] = report_paths
 
-        report_paths = write_report(
-            reports_dir=reports_dir,
-            event=event,
-            item=item,
-            scan_decision=item["scan_decision"],
-            safecli_result=safecli_result,
-        )
-        db.record_report_paths(
-            event,
-            json_path=report_paths["json"],
-        )
-        item["reports"] = report_paths
+    return item, safecli_ran
 
-        output.append(item)
-    return output
+
+def _release_ref(event: ReleaseEvent) -> dict[str, str]:
+    return {
+        "ecosystem": event.ecosystem,
+        "package_name": event.package_name,
+        "version": event.version,
+        "source": event.source,
+        "cursor": event.cursor,
+    }
+
+
+def _item_ref(item: dict) -> dict[str, object]:
+    return {
+        "ecosystem": item.get("ecosystem"),
+        "package_name": item.get("package_name"),
+        "version": item.get("version"),
+        "source": item.get("source"),
+    }
 
 
 def _open_db(path: str) -> RadarDB:

@@ -1,3 +1,5 @@
+import json
+
 from safecli_radar.cli import score_and_scan
 from safecli_radar.db import RadarDB
 from safecli_radar.models import ReleaseEvent
@@ -46,3 +48,36 @@ def test_manual_check_force_scan_runs_safecli_for_low_score(monkeypatch, tmp_pat
     )
 
     assert len(calls) == 1
+
+
+def test_score_and_scan_appends_release_progress_jsonl(tmp_path):
+    db = RadarDB(tmp_path / "radar.db")
+    db.init()
+    event = ReleaseEvent(
+        ecosystem="npm",
+        package_name="tiny-package",
+        version="1.0.0",
+        source="test",
+        cursor="1",
+        seen_at="2026-05-13T00:00:00+00:00",
+    )
+    db.record_release(event)
+    jsonl_log = tmp_path / "radar-events.jsonl"
+
+    score_and_scan(
+        db,
+        [event],
+        scan=False,
+        enrich=False,
+        artifact_triage=False,
+        user_agent="test",
+        scan_threshold=70,
+        impact_scan_threshold=80,
+        artifact_threshold=25,
+        max_safecli=1,
+        jsonl_log=str(jsonl_log),
+    )
+
+    records = [json.loads(line) for line in jsonl_log.read_text(encoding="utf-8").splitlines()]
+    assert [record["type"] for record in records] == ["release_started", "release_processed"]
+    assert records[1]["result"]["reports"]["json"].endswith("npm-tiny-package-1.0.0.json")

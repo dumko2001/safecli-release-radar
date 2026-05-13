@@ -98,7 +98,10 @@ class PyPIWatcher:
             if not match:
                 return None
             package_name = match.group(1)
-            project_metadata = self.fetch_project_metadata(package_name)
+            try:
+                project_metadata = self.fetch_project_metadata(package_name)
+            except requests.RequestException:
+                return None
             version = str((project_metadata.get("info") or {}).get("version") or "").strip()
             if not version:
                 return None
@@ -153,7 +156,10 @@ class PyPIWatcher:
     ) -> ReleaseEvent:
         metadata = dict(extra_metadata)
         if version != "latest":
-            metadata["json"] = self.fetch_release_metadata(package_name, version)
+            try:
+                metadata["json"] = self.fetch_release_metadata(package_name, version)
+            except requests.RequestException as exc:
+                metadata["metadata_fetch_error"] = str(exc)
         return ReleaseEvent(
             ecosystem="pypi",
             package_name=package_name,

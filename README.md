@@ -60,6 +60,7 @@ Radar is built for the decision in the middle:
 - Performs lightweight static archive triage before spending a SafeCLI scan.
 - Runs `safecli check ...` for high-risk or high-impact candidates.
 - Writes one JSON report per release under `./data/reports/YYYY-MM-DD/`.
+- Appends every cycle and release-processing step to `./data/radar-events.jsonl`.
 
 ## Commands
 
@@ -94,6 +95,12 @@ Print the full machine-readable watch payload:
 safecli-radar watch --output json
 ```
 
+Tail durable progress as Radar works:
+
+```bash
+tail -f ./data/radar-events.jsonl
+```
+
 Discovery only, without spending SafeCLI scans:
 
 ```bash
@@ -119,6 +126,16 @@ safecli-radar \
 
 Radar scans when static risk is high or impact is high.
 
+Risk score means "does this package look suspicious?" It comes from signals such
+as typosquat/name similarity, risky package-name terms, install scripts,
+obfuscation-like artifact findings, binary/wheel-only PyPI artifacts, and
+release-history oddities.
+
+Impact score means "how bad could it be if this package is bad?" It comes from
+blast-radius signals such as npm downloads, direct dependents, indirect
+dependents, total dependents, and whether the package name is already on the
+popular-package watchlist.
+
 High-impact packages can be scanned even when static risk is low. This matters
 because a package with many users or dependents can be dangerous even when the
 first-pass risk score looks quiet.
@@ -140,7 +157,7 @@ flowchart LR
     C --> D["Enrich blast radius"]
     D --> E["Score risk and impact"]
     E --> F{"Scan policy match?"}
-    F -- "No" --> G["Write JSON report"]
+    F -- "No" --> G["Write JSON report and JSONL event"]
     F -- "Yes" --> H["safecli check"]
     H --> G
 ```
@@ -170,10 +187,26 @@ Local runtime files are written under `./data/`:
 
 - `radar.db` for release events, cursors, scores, reports, and SafeCLI results
 - `reports/` for JSON reports explaining scan decisions
+- `radar-events.jsonl` for append-only progress records that survive crashes
 - optional SafeCLI DB and artifacts when passed through Radar flags
 
 The package archives Radar downloads for triage are temporary. They are not
 kept in the repository.
+
+## Terms
+
+Cycle means one polling pass over the configured registry sources. `watch`
+normally runs forever and starts a new cycle every `--interval` seconds.
+`--max-cycles 1` is only a smoke-test/dev option.
+
+Release means one exact package version seen from a registry feed, for example
+`npm is-number@7.0.0` or `pypi requests==2.32.3`. The first run on a fresh DB can
+see many PyPI RSS entries at once because PyPI exposes a recent-update feed; that
+does not mean Radar scanned all of them with SafeCLI.
+
+JSON reports are one file per release. JSONL is the append-only progress log.
+Use JSON reports for full per-release detail, and JSONL when another process or
+agent wants to follow what Radar is doing live.
 
 ## Development
 

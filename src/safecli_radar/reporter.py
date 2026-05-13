@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +52,23 @@ def write_report(
 
     json_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
     return {"json": str(json_path)}
+
+
+def append_jsonl_record(jsonl_path: str | Path | None, record: dict[str, Any]) -> str | None:
+    if not jsonl_path:
+        return None
+
+    path = Path(jsonl_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "logged_at": datetime.now(UTC).isoformat(),
+        **record,
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    return str(path)
 
 
 def _safe_stem(value: str) -> str:
