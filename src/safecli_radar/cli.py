@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import time
+from collections import Counter
 from pathlib import Path
 
 from safecli_radar.artifact_triage import triage_artifact
@@ -250,12 +251,12 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     safecli_cwd=args.safecli_cwd,
                     jsonl_log=args.jsonl_log,
                 )
-                cycle_summary = {
-                    "cycle": cycles,
-                    "feed_candidates": len(events),
-                    "processed": len(results),
-                    "elapsed_sec": round(time.time() - cycle_started, 2),
-                }
+                cycle_summary = _cycle_summary(
+                    cycle=cycles,
+                    events=events,
+                    results=results,
+                    elapsed_sec=time.time() - cycle_started,
+                )
                 append_jsonl_record(args.jsonl_log, {"type": "cycle_completed", **cycle_summary})
                 print(
                     json.dumps(cycle_summary, ensure_ascii=True),
@@ -311,6 +312,22 @@ def _print_watch_summary(results: list[dict]) -> None:
         )
     if len(selected) > 20:
         print(f"safecli-radar omitted {len(selected) - 20} additional candidates", flush=True)
+
+
+def _cycle_summary(
+    *,
+    cycle: int,
+    events: list[ReleaseEvent],
+    results: list[dict],
+    elapsed_sec: float,
+) -> dict:
+    return {
+        "cycle": cycle,
+        "new_exact_versions": len(events),
+        "processed": len(results),
+        "source_counts": dict(sorted(Counter(event.source for event in events).items())),
+        "elapsed_sec": round(elapsed_sec, 2),
+    }
 
 
 def _display_spec(item: dict) -> str:

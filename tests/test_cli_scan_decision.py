@@ -1,6 +1,6 @@
 import json
 
-from safecli_radar.cli import score_and_scan
+from safecli_radar.cli import _cycle_summary, score_and_scan
 from safecli_radar.db import RadarDB
 from safecli_radar.models import ReleaseEvent
 
@@ -83,3 +83,31 @@ def test_score_and_scan_appends_release_progress_jsonl(tmp_path):
     assert records[1]["report"]["release"]["package_name"] == "tiny-package"
     assert records[1]["report"]["scores"]["risk_score"] == 5
     assert results[0]["log"]["jsonl"] == str(jsonl_log)
+
+
+def test_cycle_summary_names_new_exact_versions_and_sources():
+    events = [
+        ReleaseEvent(
+            ecosystem="pypi",
+            package_name="a",
+            version="1.0.0",
+            source="pypi_updates",
+            cursor="1",
+            seen_at="now",
+        ),
+        ReleaseEvent(
+            ecosystem="pypi",
+            package_name="b",
+            version="1.0.0",
+            source="pypi_changelog",
+            cursor="2",
+            seen_at="now",
+        ),
+    ]
+
+    summary = _cycle_summary(cycle=1, events=events, results=[{}, {}], elapsed_sec=1.234)
+
+    assert summary["new_exact_versions"] == 2
+    assert summary["processed"] == 2
+    assert summary["source_counts"] == {"pypi_changelog": 1, "pypi_updates": 1}
+    assert "feed_candidates" not in summary

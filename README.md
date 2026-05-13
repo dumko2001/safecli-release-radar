@@ -203,6 +203,11 @@ Release means one exact package version seen from a registry feed, for example
 see many PyPI RSS entries at once because PyPI exposes a recent-update feed; that
 does not mean Radar scanned all of them with SafeCLI.
 
+`new_exact_versions` in watch output means "new to this Radar DB in this cycle",
+not "released in this exact minute". PyPI sources can include recent RSS update
+items, newest-package RSS items, and XML-RPC changelog catch-up items. Watch
+prints `source_counts` so you can see where each cycle's candidates came from.
+
 JSONL is the canonical output stream. Each line is a complete JSON object, so an
 agent or another process can read it while Radar is running, and a crash only
 risks the record currently being written.
