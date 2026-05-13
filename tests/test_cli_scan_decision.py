@@ -1,0 +1,48 @@
+from safecli_radar.cli import score_and_scan
+from safecli_radar.db import RadarDB
+from safecli_radar.models import ReleaseEvent
+
+
+def test_manual_check_force_scan_runs_safecli_for_low_score(monkeypatch, tmp_path):
+    db = RadarDB(tmp_path / "radar.db")
+    db.init()
+    event = ReleaseEvent(
+        ecosystem="npm",
+        package_name="tiny-package",
+        version="1.0.0",
+        source="manual_check",
+        cursor="manual",
+        seen_at="now",
+    )
+    db.record_release(event)
+    calls = []
+
+    def fake_run_safecli(event, **_kwargs):
+        calls.append(event)
+        from safecli_radar.models import SafeCLIResult
+
+        return SafeCLIResult(
+            command=["safecli", "check", event.ecosystem, event.package_name],
+            exit_code=0,
+            stdout="{}",
+            stderr="",
+            parsed_json={},
+        )
+
+    monkeypatch.setattr("safecli_radar.cli.run_safecli", fake_run_safecli)
+
+    score_and_scan(
+        db,
+        [event],
+        scan=True,
+        enrich=False,
+        artifact_triage=False,
+        user_agent="test",
+        scan_threshold=70,
+        impact_scan_threshold=80,
+        artifact_threshold=25,
+        max_safecli=1,
+        force_scan=True,
+    )
+
+    assert len(calls) == 1

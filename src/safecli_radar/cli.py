@@ -1,0 +1,373 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import time
+from pathlib import Path
+
+from safecli_radar.artifact_triage import triage_artifact
+from safecli_radar.db import RadarDB
+from safecli_radar.enrichment import enrich_release
+from safecli_radar.history import annotate_history
+from safecli_radar.models import ReleaseEvent
+from safecli_radar.npm_watcher import NpmWatcher
+from safecli_radar.pypi_watcher import PyPIWatcher
+from safecli_radar.reporter import write_report
+from safecli_radar.resolver import resolve_package
+from safecli_radar.safecli_runner import run_safecli
+from safecli_radar.scan_policy import decide_scan
+from safecli_radar.scorer import score_release
+
+DEFAULT_DB_PATH = os.environ.get("SAFECLI_RADAR_DB_PATH", "./data/radar.db")
+DEFAULT_USER_AGENT = os.environ.get(
+    "SAFECLI_RADAR_USER_AGENT",
+    "SafeCLI-Release-Radar/0.1 (+https://github.com/safecli/safecli-release-radar)",
+)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="safecli-radar",
+        description="Watch npm and PyPI releases and send high-signal candidates to SafeCLI.",
+    )
+    parser.add_argument("--db", default=DEFAULT_DB_PATH, help="SQLite DB path")
+    parser.add_argument("--reports-dir", default="./data/reports", help="Report output directory")
+    parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT, help="Registry User-Agent")
+    parser.add_argument("--safecli-command", default="safecli", help="SafeCLI command name/path")
+    parser.add_argument("--safecli-config", default=None, help="Path to SafeCLI config JSON")
+    parser.add_argument("--safecli-db", default=None, help="Path to SafeCLI SQLite DB")
+    parser.add_argument(
+        "--safecli-artifacts-dir",
+        default=None,
+        help="Path for SafeCLI scan artifacts",
+    )
+    parser.add_argument(
+        "--safecli-provider",
+        default=None,
+        help="SafeCLI provider override, e.g. opencode",
+    )
+    parser.add_argument(
+        "--safecli-cwd",
+        default=None,
+        help="Working directory for SafeCLI subprocesses",
+    )
+
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    once = sub.add_parser("once", help="Poll release feeds once")
+    _add_common_poll_args(once)
+
+    check = sub.add_parser("check", help="Resolve and scan one exact package through Radar")
+    check.add_argument("ecosystem", choices=["npm", "pypi"])
+    check.add_argument("package", help="Package spec, e.g. is-number or requests==2.32.3")
+    _add_scan_args(check)
+
+    watch = sub.add_parser("watch", help="Poll release feeds continuously")
+    _add_common_poll_args(watch)
+    watch.add_argument("--interval", type=int, default=30, help="Seconds between poll cycles")
+
+    return parser
+
+
+def _add_common_poll_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--ecosystem",
+        choices=["all", "npm", "pypi"],
+        default="all",
+        help="Registry ecosystem to watch",
+    )
+    parser.add_argument("--npm-limit", type=int, default=100, help="npm changes per cycle")
+    _add_scan_args(parser)
+
+
+def _add_scan_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--scan-threshold",
+        type=int,
+        default=70,
+        help="Risk score threshold for running SafeCLI",
+    )
+    parser.add_argument(
+        "--impact-scan-threshold",
+        type=int,
+        default=80,
+        help="Impact score threshold for running SafeCLI even when static risk is low",
+    )
+    parser.add_argument(
+        "--max-safecli-per-cycle",
+        type=int,
+        default=3,
+        help="Maximum SafeCLI scans per polling cycle; 0 means no per-cycle cap",
+    )
+    parser.add_argument(
+        "--no-scan",
+        action="store_true",
+        help="Only discover and score releases; do not run SafeCLI",
+    )
+    parser.add_argument(
+        "--no-enrich",
+        action="store_true",
+        help="Skip blast-radius enrichment APIs",
+    )
+    parser.add_argument(
+        "--no-artifact-triage",
+        action="store_true",
+        help="Skip static archive inspection before SafeCLI scanning",
+    )
+    parser.add_argument(
+        "--artifact-threshold",
+        type=int,
+        default=25,
+        help="Risk score threshold for downloading and statically inspecting archives",
+    )
+
+
+def cmd_once(args: argparse.Namespace) -> int:
+    db = _open_db(args.db)
+    events = poll_once(
+        db,
+        ecosystem=args.ecosystem,
+        npm_limit=args.npm_limit,
+        user_agent=args.user_agent,
+    )
+    results = score_and_scan(
+        db,
+        events,
+        scan=not args.no_scan,
+        enrich=not args.no_enrich,
+        artifact_triage=not args.no_artifact_triage,
+        user_agent=args.user_agent,
+        scan_threshold=args.scan_threshold,
+        impact_scan_threshold=args.impact_scan_threshold,
+        artifact_threshold=args.artifact_threshold,
+        max_safecli=args.max_safecli_per_cycle,
+        force_scan=False,
+        safecli_command=args.safecli_command,
+        safecli_config=args.safecli_config,
+        safecli_db=args.safecli_db,
+        safecli_artifacts_dir=args.safecli_artifacts_dir,
+        safecli_provider=args.safecli_provider,
+        safecli_cwd=args.safecli_cwd,
+        reports_dir=args.reports_dir,
+    )
+    print(json.dumps(results, ensure_ascii=True, indent=2))
+    return 0
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    db = _open_db(args.db)
+    event = resolve_package(args.ecosystem, args.package, user_agent=args.user_agent)
+    db.record_release(event)
+    results = score_and_scan(
+        db,
+        [event],
+        scan=not args.no_scan,
+        enrich=not args.no_enrich,
+        artifact_triage=not args.no_artifact_triage,
+        user_agent=args.user_agent,
+        scan_threshold=args.scan_threshold,
+        impact_scan_threshold=args.impact_scan_threshold,
+        artifact_threshold=args.artifact_threshold,
+        max_safecli=1,
+        force_scan=True,
+        safecli_command=args.safecli_command,
+        safecli_config=args.safecli_config,
+        safecli_db=args.safecli_db,
+        safecli_artifacts_dir=args.safecli_artifacts_dir,
+        safecli_provider=args.safecli_provider,
+        safecli_cwd=args.safecli_cwd,
+        reports_dir=args.reports_dir,
+    )
+    print(json.dumps(results, ensure_ascii=True, indent=2))
+    return 0
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    db = _open_db(args.db)
+    print(
+        "safecli-radar watching"
+        f" ecosystem={args.ecosystem}"
+        f" interval={args.interval}s"
+        f" db={Path(args.db).expanduser()}"
+    )
+    while True:
+        try:
+            events = poll_once(
+                db,
+                ecosystem=args.ecosystem,
+                npm_limit=args.npm_limit,
+                user_agent=args.user_agent,
+            )
+            results = score_and_scan(
+                db,
+                events,
+                scan=not args.no_scan,
+                enrich=not args.no_enrich,
+                artifact_triage=not args.no_artifact_triage,
+                user_agent=args.user_agent,
+                scan_threshold=args.scan_threshold,
+                impact_scan_threshold=args.impact_scan_threshold,
+                artifact_threshold=args.artifact_threshold,
+                max_safecli=args.max_safecli_per_cycle,
+                force_scan=False,
+                safecli_command=args.safecli_command,
+                safecli_config=args.safecli_config,
+                safecli_db=args.safecli_db,
+                safecli_artifacts_dir=args.safecli_artifacts_dir,
+                safecli_provider=args.safecli_provider,
+                safecli_cwd=args.safecli_cwd,
+                reports_dir=args.reports_dir,
+            )
+            if results:
+                print(json.dumps(results, ensure_ascii=True))
+        except Exception as exc:
+            print(json.dumps({"error": str(exc)}, ensure_ascii=True))
+        time.sleep(args.interval)
+
+
+def poll_once(
+    db: RadarDB,
+    *,
+    ecosystem: str,
+    npm_limit: int,
+    user_agent: str,
+) -> list[ReleaseEvent]:
+    events: list[ReleaseEvent] = []
+    if ecosystem in {"all", "npm"}:
+        events.extend(NpmWatcher(db, user_agent=user_agent).poll(limit=npm_limit))
+    if ecosystem in {"all", "pypi"}:
+        events.extend(PyPIWatcher(db, user_agent=user_agent).poll())
+    return events
+
+
+def score_and_scan(
+    db: RadarDB,
+    events: list[ReleaseEvent],
+    *,
+    scan: bool,
+    enrich: bool,
+    artifact_triage: bool,
+    user_agent: str,
+    scan_threshold: int,
+    impact_scan_threshold: int,
+    artifact_threshold: int,
+    max_safecli: int,
+    force_scan: bool = False,
+    safecli_command: str = "safecli",
+    safecli_config: str | None = None,
+    safecli_db: str | None = None,
+    safecli_artifacts_dir: str | None = None,
+    safecli_provider: str | None = None,
+    safecli_cwd: str | None = None,
+    reports_dir: str = "./data/reports",
+) -> list[dict]:
+    output: list[dict] = []
+    safecli_count = 0
+    for event in events:
+        event = annotate_history(event, db)
+        db.update_metadata(event)
+
+        if enrich:
+            event = enrich_release(event, user_agent=user_agent)
+            db.update_metadata(event)
+
+        score = score_release(event)
+
+        if artifact_triage and (
+            score.risk_score >= artifact_threshold or score.impact_score >= 80
+        ):
+            event = triage_artifact(event, user_agent=user_agent)
+            db.update_metadata(event)
+            score = score_release(event)
+
+        db.update_score(event, score)
+
+        item = {
+            "ecosystem": event.ecosystem,
+            "package_name": event.package_name,
+            "version": event.version,
+            "source": event.source,
+            "risk_score": score.risk_score,
+            "impact_score": score.impact_score,
+            "reasons": score.reasons,
+            "safecli": "not_run",
+        }
+
+        decision = decide_scan(
+            event,
+            score,
+            risk_threshold=scan_threshold,
+            impact_threshold=impact_scan_threshold,
+            force_scan=force_scan,
+        )
+        item["scan_decision"] = {
+            "should_scan": decision.should_scan,
+            "reasons": decision.reasons,
+            "budget_deferred": False,
+        }
+        safecli_result = None
+
+        within_budget = max_safecli <= 0 or safecli_count < max_safecli
+        if scan and decision.should_scan and within_budget:
+            result = run_safecli(
+                event,
+                command_name=safecli_command,
+                config_path=safecli_config,
+                db_path=safecli_db,
+                artifacts_dir=safecli_artifacts_dir,
+                provider=safecli_provider,
+                cwd=safecli_cwd,
+            )
+            db.record_safecli_result(event, result)
+            safecli_result = result
+            safecli_count += 1
+            item["safecli"] = {
+                "exit_code": result.exit_code,
+                "trust_state": (result.parsed_json or {}).get("trust_state"),
+                "aggregate_state": (result.parsed_json or {}).get("aggregate_state"),
+            }
+        elif scan and decision.should_scan and max_safecli > 0 and safecli_count >= max_safecli:
+            item["scan_decision"]["budget_deferred"] = True
+
+        report_paths = write_report(
+            reports_dir=reports_dir,
+            event=event,
+            item=item,
+            scan_decision=item["scan_decision"],
+            safecli_result=safecli_result,
+        )
+        db.record_report_paths(
+            event,
+            json_path=report_paths["json"],
+        )
+        item["reports"] = report_paths
+
+        output.append(item)
+    return output
+
+
+def _open_db(path: str) -> RadarDB:
+    db = RadarDB(Path(path).expanduser())
+    db.init()
+    return db
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if args.command == "once":
+        code = cmd_once(args)
+    elif args.command == "check":
+        code = cmd_check(args)
+    elif args.command == "watch":
+        code = cmd_watch(args)
+    else:
+        parser.print_help()
+        code = 1
+    raise SystemExit(code)
+
+
+if __name__ == "__main__":
+    main()
