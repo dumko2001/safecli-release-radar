@@ -34,13 +34,23 @@ If `safecli` is not found on `PATH`, check the standard local install location b
 ~/.local/bin/safecli check npm is-number@7.0.0
 ```
 
-If `safecli` is missing, prefer an existing local checkout first. If no working SafeCLI repo is present and the task requires installation, clone the exact SafeCLI branch that this Radar repo is meant to use:
+If `safecli` is missing, prefer an existing local checkout first. If a local SafeCLI checkout already exists, update the intended branch before using it:
+
+```bash
+git fetch origin
+git checkout codex/oss-selfhost-v1
+git pull --ff-only origin codex/oss-selfhost-v1
+```
+
+If no working SafeCLI repo is present and the task requires installation, clone the exact SafeCLI branch that this Radar repo is meant to use:
 
 ```bash
 git clone --branch codex/oss-selfhost-v1 --single-branch https://github.com/hilling-cybersec/package_manager.git
 ```
 
 Then install SafeCLI from that clone using its repo workflow. Do not substitute another branch unless the user explicitly asks for it.
+
+Use the latest commit on `codex/oss-selfhost-v1`, not an arbitrary local stale checkout of that branch.
 
 ## Install Radar
 
