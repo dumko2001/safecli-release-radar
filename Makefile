@@ -10,8 +10,20 @@ define require_python_310
 		 exit 1)
 endef
 
+define refresh_venv_if_needed
+	@if [ -x .venv/bin/python ]; then \
+		VENV_PY_VERSION=$$(./.venv/bin/python -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")'); \
+		SELECTED_PY_VERSION=$$($(PYTHON) -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")'); \
+		if [ "$$VENV_PY_VERSION" != "$$SELECTED_PY_VERSION" ]; then \
+			echo "Existing .venv uses Python $$VENV_PY_VERSION, recreating it with Python $$SELECTED_PY_VERSION."; \
+			rm -rf .venv; \
+		fi; \
+	fi
+endef
+
 install:
 	$(call require_python_310)
+	$(call refresh_venv_if_needed)
 	$(PYTHON) -m venv .venv
 	./.venv/bin/python -m pip install --upgrade pip
 	./.venv/bin/python -m pip install -e .[dev]

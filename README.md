@@ -22,6 +22,8 @@ SafeCLI remains the scanner. Radar is the discovery layer.
 Prerequisite: `python3` must already be Python 3.10 or newer. If your default
 `python3` is older, point `make` at a newer interpreter explicitly, for
 example `make PYTHON=/opt/homebrew/bin/python3.12 install`.
+If you already created `.venv` with an older interpreter, `make install` will
+recreate it automatically when you switch `PYTHON=...`.
 
 Install SafeCLI first and make sure the `safecli` command works:
 
