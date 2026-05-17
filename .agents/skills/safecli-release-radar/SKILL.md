@@ -27,6 +27,13 @@ safecli --help
 safecli check npm is-number@7.0.0
 ```
 
+If `safecli` is not found on `PATH`, check the standard local install location before assuming it is missing:
+
+```bash
+~/.local/bin/safecli --help
+~/.local/bin/safecli check npm is-number@7.0.0
+```
+
 If `safecli` is missing, prefer an existing local checkout first. If no working SafeCLI repo is present and the task requires installation, clone the exact SafeCLI branch that this Radar repo is meant to use:
 
 ```bash
@@ -108,6 +115,14 @@ When proving that Radar found a live latest version:
 
 Do not invert that order when the goal is to prove watch behavior.
 
+Interpret timestamps carefully:
+
+- `release.seen_at` means "first seen by this Radar DB"
+- `report.metadata.time` or `report.metadata.created` is closer to the registry publish timestamp
+- on a fresh DB, the first watch cycle may ingest recent registry events immediately, so a package can be published shortly before `watch` starts and still appear in cycle 1
+
+Do not describe `seen_at` as the package publish time.
+
 ## SafeCLI Handoff
 
 When Radar should scan, it normally shells out to:
@@ -146,6 +161,7 @@ Useful repo entry points:
   - scoring/triage
   - SafeCLI handoff
   - final SafeCLI result
+- Do not treat `should_scan: false` as missing observability. That is a real logged outcome: Radar discovered the release, scored it, and decided not to launch SafeCLI in that cycle.
 - If validating latest-version behavior, verify with the live registry after Radar discovery, not before.
 
 ## Final Checks Before Completion
