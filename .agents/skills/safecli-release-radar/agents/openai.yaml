@@ -1,0 +1,6 @@
+interface:
+  display_name: "SafeCLI Radar"
+  short_description: "Run and debug the Radar repo workflow"
+  default_prompt: "Use $safecli-release-radar to install, configure, and run this Radar repository with SafeCLI."
+policy:
+  allow_implicit_invocation: true
