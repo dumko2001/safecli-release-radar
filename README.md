@@ -24,6 +24,9 @@ Prerequisite: `python3` must already be Python 3.10 or newer. If your default
 example `make PYTHON=/opt/homebrew/bin/python3.12 install`.
 If you already created `.venv` with an older interpreter, `make install` will
 recreate it automatically when you switch `PYTHON=...`.
+`make install` creates `~/.local/bin/safecli-radar`. If `safecli-radar` is
+still not found afterward, add `~/.local/bin` to your `PATH` or run the
+symlinked binary directly.
 
 Install SafeCLI first and make sure the `safecli` command works:
 
@@ -82,6 +85,11 @@ Poll npm and PyPI once:
 ```bash
 safecli-radar once
 ```
+
+On a brand-new Radar DB, the npm watcher records the current npm change
+sequence first and begins watching from there. That means the first
+`safecli-radar once --ecosystem npm` run may return no events if no new npm
+changes land after bootstrap; later runs continue from the saved cursor.
 
 Run continuously:
 
