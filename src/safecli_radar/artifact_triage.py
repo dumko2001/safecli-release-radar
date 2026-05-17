@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import re
 import tarfile
 import zipfile
@@ -11,7 +12,7 @@ import requests
 from safecli_radar.http import polite_request
 from safecli_radar.models import ReleaseEvent
 
-ARCHIVE_MAX_BYTES = 12_000_000
+ARCHIVE_MAX_BYTES = int(os.environ.get("SAFECLI_RADAR_ARCHIVE_MAX_BYTES", "100000000"))
 ARCHIVE_MAX_COUNT = 4
 SCAN_FILE_MAX_BYTES = 16_000
 SCAN_FILE_MAX_COUNT = 80

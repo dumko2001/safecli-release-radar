@@ -26,8 +26,12 @@ def run_safecli(
     artifacts_dir: str | None = None,
     provider: str | None = None,
     cwd: str | None = None,
-    timeout_sec: int = 300,
+    timeout_sec: int | None = None,
 ) -> SafeCLIResult:
+    effective_timeout = timeout_sec
+    if effective_timeout is None:
+        effective_timeout = int(os.environ.get("SAFECLI_RADAR_SAFECLI_TIMEOUT_SEC", "1200"))
+
     safecli_path = shutil.which(command_name)
     if not safecli_path:
         raise RuntimeError(f"{command_name} command not found; install and set up SafeCLI first")
@@ -50,7 +54,7 @@ def run_safecli(
         cwd=str(Path(cwd).expanduser()) if cwd else None,
         env=env,
         text=True,
-        timeout=timeout_sec,
+        timeout=effective_timeout,
     )
 
     parsed = None

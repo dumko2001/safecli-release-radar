@@ -26,8 +26,8 @@ class NpmWatcher:
     def poll(self, *, limit: int = 100) -> list[ReleaseEvent]:
         cursor = self.db.get_state("npm_seq")
         if cursor is None:
-            self.db.set_state("npm_seq", self._current_sequence())
-            return []
+            cursor = str(self._bootstrap_cursor(limit))
+            self.db.set_state("npm_seq", cursor)
 
         response = polite_request(
             self.session,
@@ -48,7 +48,11 @@ class NpmWatcher:
                 self.db.set_state("npm_seq", seq)
                 continue
 
-            package_doc = self._fetch_package_doc(package_name)
+            try:
+                package_doc = self._fetch_package_doc(package_name)
+            except requests.RequestException:
+                self.db.set_state("npm_seq", seq)
+                continue
             for event in self._events_from_package_doc(package_doc, seq):
                 if self.db.record_release(event):
                     events.append(event)
@@ -56,6 +60,11 @@ class NpmWatcher:
             self.db.set_state("npm_seq", seq)
 
         return events
+
+    def _bootstrap_cursor(self, limit: int) -> int:
+        current = self._current_sequence()
+        backfill = max(int(limit), 1)
+        return max(current - backfill, 0)
 
     def _current_sequence(self) -> int:
         response = polite_request(
